@@ -2,59 +2,67 @@ node() {
     def sonarHome = tool name: 'SonarScanner', type: 'hudson.plugins.sonar.SonarRunnerInstallation'
     def mvnHome = tool name: 'mvn', type: 'hudson.tasks.Maven$MavenInstallation'
     
+    // Get the full path to Maven executable
+    def mvnPath = "${mvnHome}/bin/mvn"
+    
     stage('Code Checkout') {
-        checkout changelog: false, poll: false, scm: scmGit(branches: [[name: '*/master']], extensions: [], userRemoteConfigs: [[credentialsId: 'GitHubCreds', url: 'https://github.com/dhruvchaubey28/Maven-Build']])
+        checkout scm
     }
     
     stage('Build Automation') {
         sh """
-            ls -lart
-            ${mvnHome}/bin/mvn clean install
-            ls -lart target
+            ${mvnPath} clean install
         """
     }
     
     stage('Security Scan') {
-        // Explicitly set the full path to Maven for Snyk
-        def mvnPath = "${mvnHome}/bin/mvn"
+        // First verify Maven works
         sh """
-            echo "Using Maven from: ${mvnPath}"
+            echo "Verifying Maven installation..."
             ${mvnPath} --version
-            
-            # Run Snyk with the explicit Maven path
+            ${mvnPath} dependency:tree -DoutputType=dot
+        """
+        
+        // Then run Snyk with explicit Maven command
+        sh """
+            echo "Running Snyk scan..."
             ${tool 'Snyk'}/snyk-macos test \
                 --severity-threshold=high \
                 --json-file-output=snyk_results.json \
-                --command="${mvnPath} dependency:tree" \
-                || echo "Snyk scan found vulnerabilities"
+                --command="${mvnPath} dependency:tree"
             
-            # Archive the results
+            // Archive results regardless of scan outcome
             archiveArtifacts artifacts: 'snyk_results.json', onlyIfSuccessful: false
         """
         
-        // Quality gate for Snyk results
+        // Evaluate results
         script {
             if (fileExists('snyk_results.json')) {
                 def snykResults = readJSON file: 'snyk_results.json'
                 if (snykResults.vulnerabilities?.high || snykResults.vulnerabilities?.critical) {
-                    error("Snyk scan detected high/critical vulnerabilities - failing build")
+                    error("Snyk scan detected high/critical vulnerabilities")
                 }
+            } else {
+                error("Snyk results file not found - scan may have failed")
             }
         }
     }
     
+    // Rest of your stages...
     stage('Code Scan') {
         withSonarQubeEnv(credentialsId: 'SonarQubeCreds') {
             sh "${sonarHome}/bin/sonar-scanner"
         }
-        
         timeout(time: 15, unit: 'MINUTES') {
             waitForQualityGate abortPipeline: true
         }
     }
     
     stage('Code Deployment') {
-        deploy adapters: [tomcat9(credentialsId: 'TomcatCreds', path: '', url: 'http://54.197.62.94:8080/')], contextPath: 'Planview', onFailure: false, war: 'target/*.war'
+        deploy adapters: [tomcat9(credentialsId: 'TomcatCreds', path: '', url: 'http://54.197.62.94:8080/')], 
+              contextPath: 'Planview', 
+              onFailure: false, 
+              war: 'target/*.war'
     }
     
     post {
